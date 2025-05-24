@@ -1,5 +1,5 @@
 const { expect } = require('chai');
-const { mapPgTypeToZod, createSelectSchema, createSelectSchemaObject } = require('../../../lib/util/zod/createSelectSchema');
+const { mapPgTypeToZod, createSelectSchema, createSelectSchemaObject, getCommonJsonbPatterns } = require('../../../lib/util/zod/createSelectSchema');
 
 describe('Zod Schema Generator', () => {
   describe('mapPgTypeToZod', () => {
@@ -31,6 +31,36 @@ describe('Zod Schema Generator', () => {
     it('should map JSON types correctly', () => {
       expect(mapPgTypeToZod('json', { nullable: false })).to.equal('z.unknown()');
       expect(mapPgTypeToZod('jsonb', { nullable: false })).to.equal('z.unknown()');
+    });
+
+    it('should map JSONB with custom schemas', () => {
+      const options = {
+        jsonbSchemas: {
+          profile: 'z.object({ name: z.string(), age: z.number() })'
+        },
+        columnName: 'profile'
+      };
+      expect(mapPgTypeToZod('jsonb', { nullable: false }, options)).to.equal('z.object({ name: z.string(), age: z.number() })');
+    });
+
+    it('should fallback to z.unknown() for JSONB without custom schema', () => {
+      const options = {
+        jsonbSchemas: {
+          otherColumn: 'z.string()'
+        },
+        columnName: 'profile'
+      };
+      expect(mapPgTypeToZod('jsonb', { nullable: false }, options)).to.equal('z.unknown()');
+    });
+
+    it('should handle nullable JSONB with custom schemas', () => {
+      const options = {
+        jsonbSchemas: {
+          settings: 'z.object({ theme: z.string() })'
+        },
+        columnName: 'settings'
+      };
+      expect(mapPgTypeToZod('jsonb', { nullable: true }, options)).to.equal('z.object({ theme: z.string() }).nullable()');
     });
 
     it('should map UUID correctly', () => {
@@ -248,6 +278,96 @@ describe('Zod Schema Generator', () => {
         expect(error.message).to.include('Table "nonexistent" not found or has no columns');
       }
     });
+
+    it('should handle JSONB with custom schemas', async () => {
+      const mockColumnInfo = {
+        id: { type: 'integer', nullable: false },
+        name: { type: 'varchar', nullable: false },
+        profile: { type: 'jsonb', nullable: true },
+        settings: { type: 'jsonb', nullable: false }
+      };
+
+      mockKnex = Object.assign((tableName) => ({
+        columnInfo: () => Promise.resolve(mockColumnInfo)
+      }), {
+        client: {
+          config: {
+            client: 'pg'
+          }
+        }
+      });
+
+      const schema = await createSelectSchema(mockKnex, 'users', {
+        jsonbSchemas: {
+          profile: 'z.object({ name: z.string(), bio: z.string().optional() })',
+          settings: 'z.object({ theme: z.enum([\"light\", \"dark\"]) })'
+        }
+      });
+      
+      expect(schema).to.include('profile: z.object({ name: z.string(), bio: z.string().optional() }).nullable()');
+      expect(schema).to.include('settings: z.object({ theme: z.enum([\"light\", \"dark\"]) })');
+    });
+
+    it('should handle JSONB with common patterns', async () => {
+      const mockColumnInfo = {
+        id: { type: 'integer', nullable: false },
+        metadata: { type: 'jsonb', nullable: true },
+        tags: { type: 'jsonb', nullable: false },
+        profile: { type: 'jsonb', nullable: false }
+      };
+
+      mockKnex = Object.assign((tableName) => ({
+        columnInfo: () => Promise.resolve(mockColumnInfo)
+      }), {
+        client: {
+          config: {
+            client: 'pg'
+          }
+        }
+      });
+
+      const schema = await createSelectSchema(mockKnex, 'users', {
+        jsonbPatterns: {
+          metadata: 'metadata',
+          tags: 'tags',
+          profile: 'userProfile'
+        }
+      });
+      
+      expect(schema).to.include('metadata: z.record(z.union([z.string(), z.number(), z.boolean()])).nullable()');
+      expect(schema).to.include('tags: z.array(z.string())');
+      expect(schema).to.include('profile: z.object({');
+      expect(schema).to.include('avatar?');
+      expect(schema).to.include('bio?');
+    });
+
+    it('should prioritize jsonbSchemas over jsonbPatterns', async () => {
+      const mockColumnInfo = {
+        profile: { type: 'jsonb', nullable: false }
+      };
+
+      mockKnex = Object.assign((tableName) => ({
+        columnInfo: () => Promise.resolve(mockColumnInfo)
+      }), {
+        client: {
+          config: {
+            client: 'pg'
+          }
+        }
+      });
+
+      const schema = await createSelectSchema(mockKnex, 'users', {
+        jsonbSchemas: {
+          profile: 'z.string()' // Custom schema takes priority
+        },
+        jsonbPatterns: {
+          profile: 'userProfile' // This should be ignored
+        }
+      });
+      
+      expect(schema).to.include('profile: z.string()');
+      expect(schema).to.not.include('avatar?'); // Should not include userProfile pattern
+    });
   });
 
   describe('createSelectSchemaObject', () => {
@@ -330,6 +450,61 @@ describe('Zod Schema Generator', () => {
       expect(schemaObject).to.be.an('object');
       expect(schemaObject._mode).to.equal('strict');
       expect(schemaObject._schema).to.be.an('object');
+    });
+  });
+
+  describe('getCommonJsonbPatterns', () => {
+    const { getCommonJsonbPatterns } = require('../../../lib/util/zod/createSelectSchema');
+    
+    it('should provide common JSONB patterns', () => {
+      const patterns = getCommonJsonbPatterns();
+      
+      expect(patterns).to.have.property('record');
+      expect(patterns).to.have.property('stringRecord');
+      expect(patterns).to.have.property('objectArray');
+      expect(patterns).to.have.property('stringArray');
+      expect(patterns).to.have.property('numberArray');
+      expect(patterns).to.have.property('userProfile');
+      expect(patterns).to.have.property('settings');
+      expect(patterns).to.have.property('metadata');
+      expect(patterns).to.have.property('address');
+      expect(patterns).to.have.property('tags');
+    });
+
+    it('should generate correct schema strings for patterns', () => {
+      const patterns = getCommonJsonbPatterns();
+      
+      expect(patterns.stringRecord()).to.equal('z.record(z.string())');
+      expect(patterns.stringArray()).to.equal('z.array(z.string())');
+      expect(patterns.numberArray()).to.equal('z.array(z.number())');
+      expect(patterns.tags()).to.equal('z.array(z.string())');
+      expect(patterns.metadata()).to.equal('z.record(z.union([z.string(), z.number(), z.boolean()]))');
+    });
+
+    it('should support parameterized patterns', () => {
+      const patterns = getCommonJsonbPatterns();
+      
+      expect(patterns.record('z.number()')).to.equal('z.record(z.number())');
+      expect(patterns.objectArray('z.object({ id: z.string() })')).to.equal('z.array(z.object({ id: z.string() }))');
+    });
+
+    it('should generate complex object patterns', () => {
+      const patterns = getCommonJsonbPatterns();
+      
+      const userProfile = patterns.userProfile();
+      expect(userProfile).to.include('z.object');
+      expect(userProfile).to.include('avatar?');
+      expect(userProfile).to.include('bio?');
+      expect(userProfile).to.include('social?');
+      
+      const settings = patterns.settings();
+      expect(settings).to.include('theme?');
+      expect(settings).to.include('notifications?');
+      
+      const address = patterns.address();
+      expect(address).to.include('street:');
+      expect(address).to.include('city:');
+      expect(address).to.include('zipCode:');
     });
   });
 });
