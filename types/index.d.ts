@@ -3293,6 +3293,8 @@ declare namespace Knex {
     columns?: string[];
     exclude?: string[];
     strict?: boolean;
+    jsonbSchemas?: Record<string, string>;
+    jsonbPatterns?: Record<string, string>;
   }
 
   interface ZodUtility {
@@ -3319,6 +3321,7 @@ declare namespace Knex {
       knex: Knex,
       enumType: string
     ): Promise<string[]>;
+    getCommonJsonbPatterns(): Record<string, (arg?: string) => string>;
   }
 }
 
